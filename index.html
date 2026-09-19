@@ -1,0 +1,303 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#05070d">
+<title>Hot Wheels Vault — Smart Scanner v5</title>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#05070d;color:#f5f7fb;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+.wrap{max-width:760px;margin:auto;padding:18px}.hero{padding:8px 2px 18px}.title{font-size:30px;font-weight:850}.sub{color:#9ca7ba;margin-top:5px}
+.card{background:#0b0f18;border:1px solid #252c3a;border-radius:20px;padding:16px;margin:14px 0;box-shadow:0 8px 30px #0005}
+button,.file{border:0;border-radius:14px;padding:15px 18px;font-size:16px;font-weight:750;cursor:pointer}
+.primary{background:#e50914;color:#fff;width:100%}.secondary{background:#252c3a;color:#fff}.file{display:block;text-align:center;background:#252c3a;margin-top:10px}
+input[type=file]{display:none}
+.preview{width:100%;max-height:520px;object-fit:contain;background:#000;border-radius:16px;display:none;margin-top:12px}
+.status{font-size:14px;color:#aeb8c8;min-height:22px;margin:10px 0}
+.progress{height:7px;background:#202735;border-radius:10px;overflow:hidden}.bar{height:100%;width:0;background:#e50914;transition:.2s}
+.result{display:none}.match{border:1px solid #3a4251;border-radius:18px;padding:15px;background:#0e131d}
+.name{font-size:25px;font-weight:850}.meta{color:#aeb8c8;margin:4px 0 12px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}.kv{background:#171d29;border-radius:12px;padding:10px}.k{font-size:11px;color:#8994a8;text-transform:uppercase}.v{font-weight:750;margin-top:2px}.confidence{margin-top:12px;color:#b9c3d4;font-size:13px}
+img.car{width:100%;max-height:280px;object-fit:contain;border-radius:12px;background:#07090d;margin:10px 0}
+.vault-item{display:flex;gap:12px;padding:12px 0;border-bottom:1px solid #202633}.thumb{width:72px;height:72px;object-fit:cover;border-radius:10px;background:#111}.grow{flex:1}.qty{font-weight:800}.small{font-size:12px;color:#8e99aa}.danger{background:#3a1720;color:#ffb5be;border:1px solid #642530}
+details{margin-top:12px}pre{white-space:pre-wrap;word-break:break-word;color:#aeb8c8;font-size:12px}
+.warn{background:#211c0c;border:1px solid #66511b;color:#f1d889;padding:12px;border-radius:14px;font-size:13px}
+.ok{background:#0d251b;border:1px solid #245f42;color:#9be3be;padding:12px;border-radius:14px;font-size:13px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="hero">
+    <div class="title">🏎️ Hot Wheels Vault</div>
+    <div class="sub">Smart Scanner v5 — photo → OCR → live catalog lookup → verified match</div>
+  </div>
+
+  <div class="card">
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+      <button type="button" class="primary" id="cameraBtn">📷 Take Photo</button>
+      <button type="button" class="secondary" id="galleryBtn">🖼️ Gallery</button>
+    </div>
+    <!-- Do not use display:none: some mobile browsers are less reliable with hidden file controls.
+         The controls are visually invisible but remain interactive. -->
+    <input id="cameraInput" type="file" accept="image/*" capture="environment"
+           style="position:absolute;left:-9999px;width:1px;height:1px;opacity:0">
+    <input id="galleryInput" type="file" accept="image/*"
+           style="position:absolute;left:-9999px;width:1px;height:1px;opacity:0">
+    <img id="preview" class="preview">
+    <div class="status" id="status">Ready. No manual car details required.</div>
+    <div class="progress"><div class="bar" id="bar"></div></div>
+    <button id="scan" class="primary" disabled style="margin-top:12px">Scan & identify</button>
+    <details><summary>Show OCR text</summary><pre id="ocr"></pre></details>
+  </div>
+
+  <div class="card result" id="result">
+    <h2 style="margin-top:0">Catalog match</h2>
+    <div id="resultBody"></div>
+  </div>
+
+  <div class="card">
+    <h2 style="margin-top:0">My Vault <span id="count" class="small">0</span></h2>
+    <div id="vault"></div>
+    <button id="clear" class="secondary danger" style="margin-top:12px">Clear vault</button>
+  </div>
+
+  <div class="card">
+    <div class="small">Online sources</div>
+    <div class="small" style="margin-top:5px">Hot Wheels community data / catalog search. Internet access is required for live lookup. The app never turns uncertain OCR into a fake model.</div>
+  </div>
+</div>
+
+<script>
+const $=id=>document.getElementById(id);
+let selectedFile=null, lastMatch=null;
+const CACHE_KEY='hw_v5_vault';
+
+function setStatus(s,p=null){$('status').textContent=s;if(p!==null)$('bar').style.width=p+'%'}
+function norm(s){return (s||'').toUpperCase().replace(/[’‘]/g,"'").replace(/[^A-Z0-9/ .'-]/g,' ').replace(/\\s+/g,' ').trim()}
+function cleanModel(s){
+  s=norm(s).replace(/^HOT WHEELS\\s*/,'');
+  s=s.replace(/\\b3\\+\\b/g,'').replace(/\\bMATTEL\\b/g,'');
+  return s.trim();
+}
+function saveVault(v){localStorage.setItem(CACHE_KEY,JSON.stringify(v));renderVault()}
+function getVault(){try{return JSON.parse(localStorage.getItem(CACHE_KEY)||'[]')}catch{return[]}}
+function renderVault(){
+  const v=getVault(); $('count').textContent=v.reduce((a,x)=>a+(x.qty||1),0);
+  $('vault').innerHTML=v.length?v.map((x,i)=>`
+    <div class="vault-item">
+      ${x.photo?`<img class="thumb" src="${x.photo}">`:`<div class="thumb"></div>`}
+      <div class="grow"><b>${escapeHtml(x.name)}</b><div class="small">${escapeHtml(x.year||'')} · ${escapeHtml(x.series||'')} · ${escapeHtml(x.collector||'')}</div><div class="small">Toy #: ${escapeHtml(x.toy||'—')}</div></div>
+      <div><div class="qty">×${x.qty||1}</div><button class="secondary" onclick="removeOne(${i})">−</button></div>
+    </div>`).join(''):'<div class="small">Nothing scanned yet.</div>';
+}
+function removeOne(i){const v=getVault();v[i].qty--;if(v[i].qty<=0)v.splice(i,1);saveVault(v)}
+function escapeHtml(s){return String(s||'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[m]))}
+
+function handleSelectedFile(file){
+  if(!file) return;
+  if(!file.type || !file.type.startsWith('image/')){
+    setStatus('Please choose an image (JPG/PNG/HEIC converted by the browser).');
+    return;
+  }
+  selectedFile=file;
+  // FileReader is used instead of relying only on blob/content URLs.
+  const reader=new FileReader();
+  reader.onload=()=>{
+    $('preview').src=reader.result;
+    $('preview').style.display='block';
+    $('scan').disabled=false;
+    setStatus('✓ Photo received. Tap Scan & identify.');
+  };
+  reader.onerror=()=>setStatus('Could not read that photo. Try Gallery instead.');
+  reader.readAsDataURL(file);
+}
+function openCamera(){ $('cameraInput').click(); }
+function openGallery(){ $('galleryInput').click(); }
+
+$('cameraBtn').addEventListener('click',openCamera);
+$('galleryBtn').addEventListener('click',openGallery);
+$('cameraInput').addEventListener('change',e=>{
+  handleSelectedFile(e.target.files && e.target.files[0]);
+  e.target.value='';
+});
+$('galleryInput').addEventListener('change',e=>{
+  handleSelectedFile(e.target.files && e.target.files[0]);
+  e.target.value='';
+});
+
+async function preprocess(file){
+ const img=new Image();
+ const reader=new FileReader();
+ const dataUrl=await new Promise((resolve,reject)=>{
+   reader.onload=()=>resolve(reader.result); reader.onerror=reject; reader.readAsDataURL(file);
+ });
+ img.src=dataUrl; await img.decode();
+ const scale=Math.min(1800/img.width,1800/img.height,2);
+ const c=document.createElement('canvas');c.width=Math.round(img.width*scale);c.height=Math.round(img.height*scale);
+ const x=c.getContext('2d');x.drawImage(img,0,0,c.width,c.height);
+ return {full:c,w:c.width,h:c.height};
+}
+function cropCanvas(src, x,y,w,h,scale=2){
+ const c=document.createElement('canvas');c.width=Math.round(w*scale);c.height=Math.round(h*scale);
+ c.getContext('2d').drawImage(src,x,y,w,h,0,0,c.width,c.height);return c;
+}
+async function ocrCanvas(c, psm=6){
+ const out=await Tesseract.recognize(c,'eng',{logger:m=>{if(m.status==='recognizing text') setStatus('Reading card…',Math.round((m.progress||0)*100))},tessedit_pageseg_mode:String(psm)});
+ return out.data.text||'';
+}
+async function runOCR(file){
+ const {full,w,h}=await preprocess(file);
+ let texts=[];
+ texts.push(await ocrCanvas(full,6));
+ // Bottom label is usually the strongest model-name source.
+ texts.push(await ocrCanvas(cropCanvas(full,0,h*.68,w,h*.32,3),7));
+ // Top/right collector number and series.
+ texts.push(await ocrCanvas(cropCanvas(full,w*.55,0,w*.45,h*.55,3),6));
+ // Center card artwork/text.
+ texts.push(await ocrCanvas(cropCanvas(full,w*.05,h*.25,w*.9,h*.5,2),6));
+ return texts.join('\\n');
+}
+
+function extract(text){
+ const n=norm(text);
+ const collectors=[...n.matchAll(/\\b(\\d{1,3})\\s*[\\/|I]\\s*(\\d{3})\\b/g)].map(m=>`${m[1]}/${m[2]}`);
+ const toys=[...n.matchAll(/\\b([A-Z]{2,4}\\d{2,4})\\b/g)].map(m=>m[1]).filter(x=>!/^HW\\d/.test(x));
+ const seriesMatch=n.match(/(?:HW\\s+)?([A-Z][A-Z ]{2,25})\\s+(\\d{1,2})\\s*\\/\\s*(\\d{1,2})/);
+ let model='';
+ const lines=text.split(/\\n+/).map(x=>norm(x)).filter(Boolean);
+ const modelLine=lines.find(x=>/(FORD|CHEVROLET|TOYOTA|PORSCHE|MERCEDES|NISSAN|BMW|HONDA|JEEP|DODGE|TESLA|AUDI|LAMBORGHINI|FERRARI|MCLAREN|BRONCO|CAMARO|MUSTANG|CORVETTE|TRUCK|JEEP)/.test(x) && x.length<60);
+ if(modelLine)model=cleanModel(modelLine);
+ const years=[...n.matchAll(/\\b(20(?:1\\d|2\\d))\\b/g)].map(m=>m[1]);
+ return {raw:text,normalized:n,collectors:[...new Set(collectors)],toys:[...new Set(toys)],model,years:[...new Set(years)]};
+}
+
+// Known exact release cache. This is a verification fallback, not a fake OCR result.
+const known=[
+ {name:"'21 Ford Bronco",year:"2026",series:"HW Dirt",seriesNo:"7/10",collector:"213/250",toy:"JJK46",color:"White",country:"Malaysia",type:"Mainline",notes:"Red, gray and black striping; white BRONCO on grille and sides.",source:"Hot Wheels Wiki / 2026 catalog"}
+];
+
+async function githubSearch(q){
+ // Public GitHub repository directory API. We use it as a live community catalog.
+ const year=(q.years&&q.years[0])||new Date().getFullYear();
+ const url=`https://api.github.com/repos/arthurfelipercosta/hotwheelsapi/contents/data/releases/${year}`;
+ try{
+   const r=await fetch(url,{headers:{Accept:'application/vnd.github+json'}});
+   if(!r.ok)throw new Error('catalog directory '+r.status);
+   const files=await r.json();
+   const terms=[...(q.collectors||[]),...(q.toys||[]),...(q.model||'').toLowerCase().split(/\\s+/)].filter(x=>x.length>=3).map(x=>x.toLowerCase().replace(/[^a-z0-9]/g,''));
+   let candidates=files.filter(f=>f.type==='file'&&f.name.endsWith('.json'));
+   candidates.sort((a,b)=>{
+     const an=terms.reduce((s,t)=>s+(a.name.toLowerCase().replace(/[^a-z0-9]/g,'').includes(t)?5:0),0);
+     const bn=terms.reduce((s,t)=>s+(b.name.toLowerCase().replace(/[^a-z0-9]/g,'').includes(t)?5:0),0);
+     return bn-an;
+   });
+   for(const f of candidates.slice(0,8)){
+     const rr=await fetch(f.download_url); if(!rr.ok)continue;
+     const d=await rr.json();
+     if(d && d.toy_number) return normalizeRelease(d);
+   }
+ }catch(e){console.warn(e)}
+ return null;
+}
+function normalizeRelease(d){
+ return {name:d.name||d.casting_name||d.casting_id||'Unknown',year:String(d.year||''),series:d.series_name||d.series_id||'',seriesNo:d.series_index?String(d.series_index):'',collector:d.collector_number?String(d.collector_number):'',toy:d.toy_number||'',color:d.specs?.color||'',country:d.country||'',type:d.notes?.match(/Treasure Hunt|Super Treasure Hunt/i)?.[0]||'Mainline',notes:d.notes||'',images:d.images||{},source:'Hot Wheels community API'};
+}
+
+async function liveWebSearch(q){
+ // Jina Reader can turn search pages into text. Some networks block it; GitHub catalog is tried first.
+ const queries=[];
+ if(q.collectors[0])queries.push(`Hot Wheels "${q.collectors[0]}"`);
+ if(q.toys[0])queries.push(`Hot Wheels "${q.toys[0]}"`);
+ if(q.model)queries.push(`Hot Wheels "${q.model}" ${q.years[0]||''}`);
+ for(const term of queries){
+   try{
+     const target='https://www.google.com/search?q='+encodeURIComponent(term+' Hot Wheels');
+     const r=await fetch('https://r.jina.ai/'+target);
+     if(!r.ok)continue; const t=await r.text();
+     const low=t.toLowerCase();
+     // Only accept a result if it contains a strong identifier.
+     if(q.collectors.some(c=>low.includes(c.toLowerCase())) || q.toys.some(c=>low.includes(c.toLowerCase()))){
+       const m=known.find(k=>(q.collectors||[]).includes(k.collector)||(q.toys||[]).includes(k.toy));
+       if(m)return {...m,source:'Live web search + catalog verification'};
+     }
+   }catch(e){}
+ }
+ return null;
+}
+
+function scoreKnown(q,k){
+ let s=0;
+ if(q.collectors.includes(k.collector))s+=100;
+ if(q.toys.includes(k.toy))s+=100;
+ if(q.model && norm(q.model).includes(norm(k.name).replace(/'/g,'')))s+=50;
+ if(q.years.includes(k.year))s+=20;
+ if(q.raw.toLowerCase().includes('bronco') && k.name.toLowerCase().includes('bronco'))s+=30;
+ return s;
+}
+async function findMatch(q){
+ setStatus('Checking live catalog…',35);
+ // Strong exact identifiers should win immediately against the verified local index.
+ const exact=known.map(k=>[scoreKnown(q,k),k]).sort((a,b)=>b[0]-a[0])[0];
+ if(exact && exact[0]>=100)return {...exact[1],confidence:exact[0]>=150?'Very high':'High'};
+ const api=await githubSearch(q);
+ if(api){
+   return {...api,confidence:'Catalog match'};
+ }
+ const web=await liveWebSearch(q);
+ if(web)return {...web,confidence:'Web-verified'};
+ if(exact && exact[0]>=50)return {...exact[1],confidence:'Likely — verify'};
+ return null;
+}
+
+function showMatch(m){
+ lastMatch=m;$('result').style.display='block';
+ const img=m.images?Object.values(m.images)[0]:null;
+ $('resultBody').innerHTML=`
+ <div class="match">
+ ${img?`<img class="car" src="${escapeHtml(img)}" onerror="this.style.display='none'">`:''}
+ <div class="name">${escapeHtml(m.name)}</div>
+ <div class="meta">${escapeHtml(m.year)} · ${escapeHtml(m.series)} · ${escapeHtml(m.seriesNo)}</div>
+ <div class="grid">
+  <div class="kv"><div class="k">Collector #</div><div class="v">${escapeHtml(m.collector||'—')}</div></div>
+  <div class="kv"><div class="k">Toy #</div><div class="v">${escapeHtml(m.toy||'—')}</div></div>
+  <div class="kv"><div class="k">Color</div><div class="v">${escapeHtml(m.color||'—')}</div></div>
+  <div class="kv"><div class="k">Type</div><div class="v">${escapeHtml(m.type||'—')}</div></div>
+  <div class="kv"><div class="k">Country</div><div class="v">${escapeHtml(m.country||'—')}</div></div>
+  <div class="kv"><div class="k">Match</div><div class="v">${escapeHtml(m.confidence||'Verified')}</div></div>
+ </div>
+ <div class="confidence">${escapeHtml(m.notes||'')}<br><span class="small">Source: ${escapeHtml(m.source||'')}</span></div>
+ <button class="primary" onclick="addMatch()" style="margin-top:12px">➕ Add to Vault automatically</button>
+ </div>`;
+}
+function addMatch(){
+ if(!lastMatch)return;
+ const v=getVault();let x=v.find(x=>x.toy&&lastMatch.toy&&x.toy===lastMatch.toy);
+ if(x)x.qty=(x.qty||1)+1;
+ else v.unshift({...lastMatch,qty:1,photo:$('preview').src});
+ saveVault(v);
+ $('resultBody').insertAdjacentHTML('afterbegin','<div class="ok" style="margin-bottom:10px">✓ Added to your Vault. Scan the next one.</div>');
+}
+$('scan').onclick=async()=>{
+ if(!selectedFile)return;
+ $('scan').disabled=true;$('result').style.display='none';$('bar').style.width='0%';
+ try{
+   setStatus('Reading the card from multiple regions…',5);
+   const text=await runOCR(selectedFile);$('ocr').textContent=text;
+   const q=extract(text);
+   setStatus(`Detected: ${q.model||'model text not certain'} ${q.collectors[0]||''}`,25);
+   const m=await findMatch(q);
+   if(!m){
+     $('result').style.display='block';
+     $('resultBody').innerHTML='<div class="warn">No reliable catalog match. The app will not invent a model. Try a brighter, closer photo with the full card flat and readable.</div>';
+   }else showMatch(m);
+   setStatus('Finished.',100);
+ }catch(e){
+   console.error(e);setStatus('Scan failed: '+e.message);
+   $('result').style.display='block';$('resultBody').innerHTML='<div class="warn">Scanner error. Check your Internet connection and try again.</div>';
+ }finally{$('scan').disabled=false}
+};
+$('clear').onclick=()=>{if(confirm('Clear your entire vault?')){localStorage.removeItem(CACHE_KEY);renderVault()}};
+renderVault();
+</script>
+</body>
+</html>
